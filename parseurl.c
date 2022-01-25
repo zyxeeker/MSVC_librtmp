@@ -55,19 +55,19 @@ int RTMP_ParseURL(const char *url, int *protocol, AVal *host, unsigned int *port
 	{
 	int len = (int)(p-url);
 
-	if(len == 4 && strncmp(url, "rtmp", 4)==0)
+	if(len == 4 && strncasecmp(url, "rtmp", 4)==0)
 		*protocol = RTMP_PROTOCOL_RTMP;
-	else if(len == 5 && strncmp(url, "rtmpt", 5)==0)
+	else if(len == 5 && strncasecmp(url, "rtmpt", 5)==0)
 		*protocol = RTMP_PROTOCOL_RTMPT;
-	else if(len == 5 && strncmp(url, "rtmps", 5)==0)
+	else if(len == 5 && strncasecmp(url, "rtmps", 5)==0)
 	        *protocol = RTMP_PROTOCOL_RTMPS;
-	else if(len == 5 && strncmp(url, "rtmpe", 5)==0)
+	else if(len == 5 && strncasecmp(url, "rtmpe", 5)==0)
 	        *protocol = RTMP_PROTOCOL_RTMPE;
-	else if(len == 5 && strncmp(url, "rtmfp", 5)==0)
+	else if(len == 5 && strncasecmp(url, "rtmfp", 5)==0)
 	        *protocol = RTMP_PROTOCOL_RTMFP;
-	else if(len == 6 && strncmp(url, "rtmpte", 6)==0)
+	else if(len == 6 && strncasecmp(url, "rtmpte", 6)==0)
 	        *protocol = RTMP_PROTOCOL_RTMPTE;
-	else if(len == 6 && strncmp(url, "rtmpts", 6)==0)
+	else if(len == 6 && strncasecmp(url, "rtmpts", 6)==0)
 	        *protocol = RTMP_PROTOCOL_RTMPTS;
 	else {
 		RTMP_Log(RTMP_LOGWARNING, "Unknown protocol!\n");
@@ -137,12 +137,14 @@ parsehost:
 	 * application = app[/appinstance]
 	 */
 
-	char *slash2, *slash3 = NULL;
+	char *slash2, *slash3 = NULL, *slash4 = NULL;
 	int applen, appnamelen;
 
 	slash2 = strchr(p, '/');
 	if(slash2)
 		slash3 = strchr(slash2+1, '/');
+	if(slash3)
+		slash4 = strchr(slash3+1, '/');
 
 	applen = end-p; /* ondemand, pass all parameters as app */
 	appnamelen = applen; /* ondemand length */
@@ -156,7 +158,9 @@ parsehost:
                 appnamelen = 8;
         }
 	else { /* app!=ondemand, so app is app[/appinstance] */
-		if(slash3)
+		if(slash4)
+			appnamelen = slash4-p;
+		else if(slash3)
 			appnamelen = slash3-p;
 		else if(slash2)
 			appnamelen = slash2-p;

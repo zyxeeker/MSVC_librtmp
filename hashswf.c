@@ -30,6 +30,8 @@
 #include "log.h"
 #include "http.h"
 
+#define strnicmp _strnicmp
+
 #ifdef CRYPTO
 #ifdef USE_POLARSSL
 #include <polarssl/sha2.h>
@@ -42,16 +44,16 @@
 #define HMAC_finish(ctx, dig, dlen)	dlen = SHA256_DIGEST_LENGTH; sha2_hmac_finish(&ctx, dig)
 #define HMAC_close(ctx)
 #elif defined(USE_GNUTLS)
-#include <gnutls/gnutls.h>
-#include <gcrypt.h>
+#include <nettle/hmac.h>
 #ifndef SHA256_DIGEST_LENGTH
 #define SHA256_DIGEST_LENGTH	32
 #endif
-#define HMAC_CTX	gcry_md_hd_t
-#define HMAC_setup(ctx, key, len)	gcry_md_open(&ctx, GCRY_MD_SHA256, GCRY_MD_FLAG_HMAC); gcry_md_setkey(ctx, key, len)
-#define HMAC_crunch(ctx, buf, len)	gcry_md_write(ctx, buf, len)
-#define HMAC_finish(ctx, dig, dlen)	dlen = SHA256_DIGEST_LENGTH; memcpy(dig, gcry_md_read(ctx, 0), dlen)
-#define HMAC_close(ctx)	gcry_md_close(ctx)
+#undef HMAC_CTX
+#define HMAC_CTX	struct hmac_sha256_ctx
+#define HMAC_setup(ctx, key, len)	hmac_sha256_set_key(&ctx, len, key)
+#define HMAC_crunch(ctx, buf, len)	hmac_sha256_update(&ctx, len, buf)
+#define HMAC_finish(ctx, dig, dlen)	dlen = SHA256_DIGEST_LENGTH; hmac_sha256_digest(&ctx, SHA256_DIGEST_LENGTH, dig)
+#define HMAC_close(ctx)
 #else	/* USE_OPENSSL */
 #include <openssl/ssl.h>
 #include <openssl/sha.h>
@@ -66,9 +68,11 @@
 extern void RTMP_TLS_Init();
 extern TLS_CTX RTMP_TLS_ctx;
 
+#include <zlib.h>
+
 #endif /* CRYPTO */
 
-#include <zlib.h>
+#define DATELEN	64
 
 #define	AGENT	"Mozilla/5.0"
 
@@ -82,7 +86,8 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
 #ifdef CRYPTO
   int ssl = 0;
 #endif
-  int hlen, flen = 0;
+  int hlen;
+  long flen = 0;
   int rc, i;
   int len_known;
   HTTPResult ret = HTTPRES_OK;
@@ -95,7 +100,7 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
   sa.sin_family = AF_INET;
 
   /* we only handle http here */
-  if (strncmp(url, "http", 4))
+  if (strncasecmp(url, "http", 4))
     return HTTPRES_BAD_REQUEST;
 
   if (url[4] == 's')
@@ -141,7 +146,7 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
     return HTTPRES_LOST_CONNECTION;
   i =
     sprintf(sb.sb_buf,
-	    "GET %s HTTP/1.0\r\nUser-Agent: %s\r\nHost: %s\r\nReferrer: %.*s\r\n",
+	    "GET %s HTTP/1.0\r\nUser-Agent: %s\r\nHost: %s\r\nReferer: %.*s\r\n",
 	    path, AGENT, host, (int)(path - url + 1), url);
   if (http->date[0])
     i += sprintf(sb.sb_buf + i, "If-Modified-Since: %s\r\n", http->date);
@@ -163,7 +168,7 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
 #else
       TLS_client(RTMP_TLS_ctx, sb.sb_ssl);
       TLS_setfd(sb.sb_ssl, sb.sb_socket);
-      if ((i = TLS_connect(sb.sb_ssl)) < 0)
+      if (TLS_connect(sb.sb_ssl) < 0)
 	{
 	  RTMP_Log(RTMP_LOGERROR, "%s, TLS_Connect failed", __FUNCTION__);
 	  ret = HTTPRES_LOST_CONNECTION;
@@ -238,17 +243,23 @@ HTTP_get(struct HTTP_ctx *http, const char *url, HTTP_read_callback *cb)
 	  break;
 	}
       else
-	if (!strncmp
+	if (!strncasecmp
 	    (sb.sb_start, "Content-Length: ", sizeof("Content-Length: ") - 1))
 	{
-	  flen = atoi(sb.sb_start + sizeof("Content-Length: ") - 1);
+	  flen = strtol(sb.sb_start + sizeof("Content-Length: ") - 1, NULL, 10);
+	  if (flen < 1 || flen > INT_MAX)
+	  {
+	    ret = HTTPRES_BAD_REQUEST;
+	    goto leave;
+	  }
 	}
       else
-	if (!strncmp
+	if (!strncasecmp
 	    (sb.sb_start, "Last-Modified: ", sizeof("Last-Modified: ") - 1))
 	{
 	  *p2 = '\0';
-	  strcpy(http->date, sb.sb_start + sizeof("Last-Modified: ") - 1);
+	  strncpy(http->date, sb.sb_start + sizeof("Last-Modified: ") - 1, DATELEN-1);
+	  http->date[DATELEN-1] = '\0';
 	}
       p2 += 2;
       sb.sb_size -= p2 - sb.sb_start;
@@ -405,7 +416,7 @@ make_unix_time(char *s)
     time.tm_year -= ysub;
 
   for (i = 0; i < 12; i++)
-    if (!strncmp(month, monthtab[i], 3))
+    if (!strncasecmp(month, monthtab[i], 3))
       {
 	time.tm_mon = i;
 	break;
@@ -435,7 +446,7 @@ make_unix_time(char *s)
 /* Convert a Unix time to a network time string
  * Weekday, DD-MMM-YYYY HH:MM:SS GMT
  */
-void
+static void
 strtime(time_t * t, char *s)
 {
   struct tm *tm;
@@ -453,7 +464,7 @@ RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,
 	     int age)
 {
   FILE *f = NULL;
-  char *path, date[64], cctim[64];
+  char *path, date[DATELEN], cctim[DATELEN];
   long pos = 0;
   time_t ctim = -1, cnow;
   int i, got = 0, ret = 0;
@@ -466,7 +477,7 @@ RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,
 
   date[0] = '\0';
 #ifdef _WIN32
-#ifdef _XBOX
+#ifdef XBMC4XBOX
   hpre.av_val = "Q:";
   hpre.av_len = 2;
   home.av_val = "\\UserData";
@@ -554,7 +565,8 @@ RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,
 	      else if (!strncmp(buf, "date: ", 6))
 		{
 		  buf[strlen(buf) - 1] = '\0';
-		  strncpy(date, buf + 6, sizeof(date));
+		  strncpy(date, buf + 6, sizeof(date)-1);
+		  date[DATELEN-1] = '\0';
 		  got++;
 		}
 	      else if (!strncmp(buf, "ctim: ", 6))
